@@ -1,0 +1,902 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Ticket Ledger — Offline PWA</title>
+  <link rel="manifest" href="manifest.json" />
+  <meta name="theme-color" content="#0b74de" />
+  <style>
+    /* Simple responsive UI: sidebar + main */
+    :root{
+      --accent:#0b74de;
+      --muted:#666;
+      --bg:#f7f9fc;
+      --card:#fff;
+      --radius:10px;
+      font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+    }
+    html,body{height:100%;margin:0;background:var(--bg);color:#222}
+    .app{display:flex;height:100vh;gap:18px;padding:18px;box-sizing:border-box}
+    .sidebar{width:300px;min-width:260px;background:linear-gradient(180deg,#fff,#f2f7ff);border-radius:var(--radius);padding:18px;box-shadow:0 6px 18px rgba(12,36,72,.06);display:flex;flex-direction:column;gap:12px}
+    .brand{display:flex;align-items:center;gap:12px}
+    .brand img{width:48px;height:48px;border-radius:8px;object-fit:cover}
+    .brand h1{font-size:18px;margin:0}
+    .menu{display:flex;flex-direction:column;gap:6px;margin-top:6px}
+    .menu button{background:none;border:0;padding:10px;border-radius:8px;text-align:left;cursor:pointer;font-size:15px}
+    .menu button.active{background:rgba(11,116,222,.08);font-weight:600}
+    .card{background:var(--card);padding:14px;border-radius:10px;box-shadow:0 6px 18px rgba(12,36,72,.03)}
+    .pin{display:flex;gap:8px}
+    .pin input{flex:1;padding:10px;border-radius:8px;border:1px solid #ddd}
+    .small{font-size:13px;color:var(--muted)}
+    .main{flex:1;display:flex;flex-direction:column;gap:16px}
+    .toolbar{display:flex;justify-content:space-between;gap:12px;align-items:center}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:8px;border-bottom:1px solid #f1f3f6;text-align:left;font-size:14px}
+    .btn{background:var(--accent);color:#fff;padding:8px 12px;border-radius:8px;border:0;cursor:pointer}
+    .btn.ghost{background:none;color:var(--accent);border:1px solid rgba(11,116,222,.12)}
+    .row{display:flex;gap:8px;align-items:center}
+    .form{display:flex;flex-direction:column;gap:8px}
+    input[type="text"], input[type="number"], textarea, select, .search {
+      padding:8px;border-radius:8px;border:1px solid #e2e6ee;background:#fff
+    }
+    .list{max-height:50vh;overflow:auto}
+    .tx{display:flex;justify-content:space-between;gap:8px;padding:8px;border-radius:8px}
+    .badge{background:#eef6ff;padding:6px;border-radius:6px;font-weight:600;color:var(--accent)}
+    .ks{font-size:13px;color:#666}
+    footer.small{font-size:12px;color:#888;text-align:center;padding:8px}
+    /* responsive */
+    @media (max-width:800px){
+      .app{flex-direction:column;padding:12px}
+      .sidebar{width:100%;min-width:unset;display:flex;flex-direction:row;gap:8px;align-items:center;padding:10px}
+      .menu{display:flex;flex-direction:row;gap:6px;overflow:auto}
+      .brand h1{display:none}
+    }
+    /* invoice preview */
+    #invoice-preview{background:#fff;padding:18px;border-radius:8px}
+    .field-row{display:flex;gap:8px}
+  </style>
+</head>
+<body>
+<div class="app" id="app" aria-live="polite">
+  <aside class="sidebar card" id="sidebar">
+    <div class="brand">
+      <img id="logo-img" src="" alt="logo" onerror="this.style.display='none'"/>
+      <div>
+        <h1 id="business-name">Ticket Ledger</h1>
+        <div class="small ks">Offline PWA · Single user</div>
+      </div>
+    </div>
+
+    <div class="menu" id="menu">
+      <button data-page="dashboard" class="active">Dashboard</button>
+      <button data-page="parties">Vendors & Customers</button>
+      <button data-page="transactions">Transactions</button>
+      <button data-page="invoices">Invoices / Print</button>
+      <button data-page="reports">Reports</button>
+      <button data-page="backup">Backup / Restore</button>
+      <button data-page="settings">Settings</button>
+    </div>
+
+    <div style="margin-top:auto">
+      <div class="small">Locked: <span id="lock-state">No</span></div>
+      <div style="height:8px"></div>
+      <div class="row">
+        <button class="btn" id="lock-btn">Lock</button>
+        <button class="btn ghost" id="logout-btn">Clear PIN</button>
+      </div>
+      <div style="height:8px"></div>
+      <div class="small">Version 1.0 · Local only</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <div class="toolbar">
+      <div style="display:flex;gap:12px;align-items:center">
+        <input class="search" id="global-search" placeholder="Search parties or transactions" style="min-width:320px"/>
+        <select id="filter-type"><option value="">All types</option><option value="sale">Sales (Customers)</option><option value="purchase">Purchases (Vendors)</option></select>
+      </div>
+      <div class="row">
+        <div class="small ks">Logged in as single user</div>
+        <button class="btn" id="add-party-btn">+ Add Party</button>
+        <button class="btn" id="add-tx-btn">+ Add Transaction</button>
+      </div>
+    </div>
+
+    <section id="page-content" class="card" style="overflow:auto"></section>
+
+    <footer class="small">Data stored locally in your browser. Backup regularly.</footer>
+  </main>
+</div>
+
+<!-- Modal placeholders -->
+<div id="modal-root"></div>
+
+<script>
+/*
+  Ticket Ledger PWA (single-file UI)
+  Uses IndexedDB for offline storage.
+  Features implemented:
+  - Parties (vendors/customers)
+  - Transactions with partial payments
+  - Invoice/print view
+  - CSV export (Excel-friendly)
+  - Backup / Restore JSON
+  - PIN lock stored locally
+  - Service worker registration (sw.js) for offline cache
+*/
+
+/* ---------- IndexedDB helper ---------- */
+const DB_NAME = 'ticket_ledger_db_v1';
+const DB_VERSION = 1;
+let db;
+function openDB(){
+  return new Promise((resolve,reject)=>{
+    const req = indexedDB.open(DB_NAME,DB_VERSION);
+    req.onupgradeneeded = e=>{
+      const d = e.target.result;
+      if(!d.objectStoreNames.contains('parties')){
+        const store = d.createObjectStore('parties',{keyPath:'id',autoIncrement:true});
+      }
+      if(!d.objectStoreNames.contains('transactions')){
+        const store = d.createObjectStore('transactions',{keyPath:'id',autoIncrement:true});
+      }
+      if(!d.objectStoreNames.contains('settings')){
+        const store = d.createObjectStore('settings',{keyPath:'key'});
+      }
+    };
+    req.onsuccess = e=>{
+      db = e.target.result;
+      resolve(db);
+    };
+    req.onerror = e=> reject(e);
+  });
+}
+function idbPut(storeName, value){ return new Promise((res,rej)=>{ const tx = db.transaction(storeName,'readwrite'); const s = tx.objectStore(storeName); const ok = s.put(value); ok.onsuccess=()=>res(ok.result); ok.onerror=err=>rej(err); }) }
+function idbAdd(storeName, value){ return new Promise((res,rej)=>{ const tx = db.transaction(storeName,'readwrite'); const s = tx.objectStore(storeName); const ok = s.add(value); ok.onsuccess=()=>res(ok.result); ok.onerror=err=>rej(err); }) }
+function idbGetAll(storeName){ return new Promise((res,rej)=>{ const tx = db.transaction(storeName,'readonly'); const s = tx.objectStore(storeName); const req = s.getAll(); req.onsuccess=()=>res(req.result); req.onerror=err=>rej(err); }) }
+function idbGet(storeName, key){ return new Promise((res,rej)=>{ const tx = db.transaction(storeName,'readonly'); const s = tx.objectStore(storeName); const req = s.get(key); req.onsuccess=()=>res(req.result); req.onerror=err=>rej(err); }) }
+function idbDelete(storeName, key){ return new Promise((res,rej)=>{ const tx = db.transaction(storeName,'readwrite'); const s = tx.objectStore(storeName); const req = s.delete(key); req.onsuccess=()=>res(true); req.onerror=err=>rej(err); }) }
+function idbClear(storeName){ return new Promise((res,rej)=>{ const tx = db.transaction(storeName,'readwrite'); const s = tx.objectStore(storeName); const req = s.clear(); req.onsuccess=()=>res(true); req.onerror=err=>rej(err); }) }
+
+/* ---------- App state ---------- */
+const state = {
+  page:'dashboard',
+  parties:[],
+  transactions:[],
+  settings: {},
+  locked: false,
+  logoDataUrl: null
+};
+
+/* ---------- Utilities ---------- */
+function $(sel,root=document){ return root.querySelector(sel) }
+function $all(sel,root=document){ return Array.from(root.querySelectorAll(sel)) }
+function fmt(n){ return Number(n||0).toLocaleString(undefined,{minimumFractionDigits:2, maximumFractionDigits:2}) }
+function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,8) }
+function showModal(html){ const root = $('#modal-root'); root.innerHTML = '<div class="card" style="position:fixed;inset:20px;display:flex;align-items:flex-start;justify-content:center;padding:24px;z-index:9999;overflow:auto">'+html+'</div>'; }
+function closeModal(){ $('#modal-root').innerHTML=''; }
+
+/* ---------- Settings and PIN ---------- */
+async function loadSettings(){
+  const all = await idbGetAll('settings');
+  state.settings = {};
+  all.forEach(s => state.settings[s.key] = s.value);
+  state.logoDataUrl = state.settings.logo || null;
+  if(state.logoDataUrl) $('#logo-img').src = state.logoDataUrl;
+  $('#business-name').textContent = state.settings.businessName || 'Ticket Ledger';
+  updateLockUI();
+}
+function saveSetting(key, value){ return idbPut('settings',{key, value}) }
+function setPIN(pin){
+  if(!/^[0-9]{4}$/.test(pin)) return Promise.reject('PIN must be 4 digits');
+  return saveSetting('pin', pin).then(()=>{ state.settings.pin = pin; updateLockUI(); });
+}
+function clearPIN(){
+  return idbDelete('settings','pin').then(()=>{ delete state.settings.pin; updateLockUI(); alert('PIN cleared. You will be asked to set a new PIN on next use.'); });
+}
+function updateLockUI(){
+  state.locked = !!state.settings.locked;
+  $('#lock-state').textContent = state.locked ? 'Yes' : 'No';
+}
+
+/* Lock/unlock behavior */
+function requirePINIfSet(){
+  if(!state.settings.pin) return; // first run will set
+  if(state.settings.locked){
+    showLockScreen();
+  }
+}
+function showLockScreen(){
+  state.locked = true;
+  saveSetting('locked', true);
+  updateLockUI();
+  const html = `
+    <div style="max-width:420px;width:100%">
+      <h2>Enter PIN</h2>
+      <div class="small">App is locked. Enter 4-digit PIN to continue.</div>
+      <div style="height:12px"></div>
+      <input id="pin-input" placeholder="1234" style="font-size:18px;padding:10px;width:100%;border-radius:8px" />
+      <div style="height:12px"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" id="pin-ok">Unlock</button>
+        <button class="btn ghost" id="pin-logout">Clear PIN</button>
+      </div>
+    </div>`;
+  showModal(html);
+  $('#pin-input').focus();
+  $('#pin-ok').onclick = async () => {
+    const val = $('#pin-input').value.trim();
+    if(val === state.settings.pin){
+      closeModal();
+      state.locked=false;
+      saveSetting('locked', false);
+      updateLockUI();
+      renderPage();
+    } else alert('Wrong PIN');
+  };
+  $('#pin-logout').onclick = ()=>{
+    closeModal();
+    clearPIN();
+  };
+}
+async function initialPINFlow(){
+  if(!state.settings.pin){
+    // ask to set PIN on first use
+    const html = `
+      <div style="max-width:520px">
+        <h2>Set 4-digit PIN</h2>
+        <div class="small">This PIN is stored locally only. It provides basic privacy for single-user access.</div>
+        <div style="height:12px"></div>
+        <input id="new-pin" placeholder="Choose 4 digits" style="font-size:18px;padding:10px;width:100%;border-radius:8px" />
+        <div style="height:12px"></div>
+        <div style="display:flex;gap:8px">
+          <button class="btn" id="set-pin-btn">Save PIN</button>
+        </div>
+      </div>`;
+    showModal(html);
+    $('#set-pin-btn').onclick = async ()=>{
+      const pin = $('#new-pin').value.trim();
+      try{
+        await setPIN(pin);
+        closeModal();
+        alert('PIN saved locally. You can change or clear it in Settings.');
+      }catch(e){
+        alert(e);
+      }
+    };
+  } else {
+    // if locked, show lock screen
+    if(state.settings.locked) showLockScreen();
+  }
+}
+
+/* ---------- CRUD: Parties ---------- */
+async function loadData(){
+  state.parties = await idbGetAll('parties');
+  state.transactions = await idbGetAll('transactions');
+}
+function renderPage(){
+  $all('#menu button').forEach(b => b.classList.toggle('active', b.dataset.page === state.page));
+  requirePINIfSet();
+  if(state.locked) return;
+  if(state.page === 'dashboard') renderDashboard();
+  if(state.page === 'parties') renderParties();
+  if(state.page === 'transactions') renderTransactions();
+  if(state.page === 'invoices') renderInvoices();
+  if(state.page === 'reports') renderReports();
+  if(state.page === 'backup') renderBackup();
+  if(state.page === 'settings') renderSettings();
+}
+
+/* ---------- Page: Dashboard ---------- */
+function computeSummary(){
+  const sales = state.transactions.filter(t=> t.type === 'sale');
+  const purchases = state.transactions.filter(t=> t.type === 'purchase');
+  const totalSales = sales.reduce((s,t)=> s + Number(t.total||0),0);
+  const totalPurchases = purchases.reduce((s,t)=> s + Number(t.total||0),0);
+  const profit = totalSales - totalPurchases;
+  // balances
+  const partyBalances = {};
+  state.parties.forEach(p=> partyBalances[p.id] = {name:p.name, balance:0});
+  state.transactions.forEach(tx=>{
+    const paid = (tx.payments||[]).reduce((s,p)=> s + Number(p.amount||0), 0);
+    const bal = Number(tx.total||0) - paid;
+    if(!partyBalances[tx.partyId]) partyBalances[tx.partyId] = {name:'Unknown', balance:0};
+    if(tx.type === 'sale') partyBalances[tx.partyId].balance += bal; // receivable
+    else partyBalances[tx.partyId].balance -= bal; // payable negative
+  });
+  return {totalSales,totalPurchases,profit, partyBalances};
+}
+function renderDashboard(){
+  const c = computeSummary();
+  const html = `
+    <h2>Dashboard</h2>
+    <div class="grid">
+      <div class="card">
+        <div class="small">Total Sales</div>
+        <div style="font-size:22px;font-weight:700">PKR ${fmt(c.totalSales)}</div>
+      </div>
+      <div class="card">
+        <div class="small">Total Purchases</div>
+        <div style="font-size:22px;font-weight:700">PKR ${fmt(c.totalPurchases)}</div>
+      </div>
+      <div class="card">
+        <div class="small">Profit / Loss</div>
+        <div style="font-size:22px;font-weight:700">${c.profit>=0 ? 'PKR ' + fmt(c.profit) : '- PKR ' + fmt(Math.abs(c.profit))}</div>
+      </div>
+      <div class="card">
+        <div class="small">Parties with balances</div>
+        <div style="max-height:200px;overflow:auto">
+          ${Object.values(c.partyBalances).filter(pb=>Math.abs(pb.balance)>0.01).map(pb=>`<div style="display:flex;justify-content:space-between;padding:6px;border-bottom:1px solid #f1f3f6"><div>${pb.name}</div><div class="small">${pb.balance>0 ? 'Receivable: PKR '+fmt(pb.balance) : 'Payable: PKR '+fmt(Math.abs(pb.balance))}</div></div>`).join('') || '<div class="small">All settled</div>'}
+        </div>
+      </div>
+    </div>
+  `;
+  $('#page-content').innerHTML = html;
+}
+
+/* ---------- Page: Parties (Vendors & Customers) ---------- */
+function renderParties(){
+  let html = `
+    <h2>Vendors & Customers</h2>
+    <div class="row" style="margin-bottom:8px">
+      <select id="party-type-filter"><option value="">All</option><option value="vendor">Vendors</option><option value="customer">Customers</option></select>
+      <input id="party-search" placeholder="Search party by name or phone" style="min-width:260px" />
+      <button class="btn ghost" id="import-sample">Import sample</button>
+    </div>
+    <div class="list card" id="party-list">
+      ${state.parties.map(p=>`
+        <div class="tx" data-id="${p.id}">
+          <div>
+            <div style="font-weight:600">${p.name} <span class="small">(${p.type||'unknown'})</span></div>
+            <div class="small">${p.phone || ''} ${p.note ? ' · ' + p.note : ''}</div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+            <div class="small">Balance: ${fmt(p.balance || 0)}</div>
+            <div style="display:flex;gap:6px">
+              <button class="btn ghost edit-party">Edit</button>
+              <button class="btn" data-action="new-tx">Tx</button>
+            </div>
+          </div>
+        </div>
+      `).join('')}
+    </div>
+  `;
+  $('#page-content').innerHTML = html;
+
+  $('#import-sample').onclick = async ()=>{
+    const sample = [
+      {name:'Vendor A', type:'vendor', phone:'0300-1111111'},
+      {name:'Customer X', type:'customer', phone:'0345-2222222'}
+    ];
+    for(const p of sample) await idbAdd('parties', p);
+    await loadData(); renderParties();
+  };
+
+  $all('.edit-party').forEach(btn=>{
+    btn.onclick = e=>{
+      const id = e.target.closest('[data-id]').dataset.id;
+      const p = state.parties.find(x=>String(x.id) === String(id));
+      showPartyEditor(p);
+    };
+  });
+  $all('button[data-action="new-tx"]').forEach(btn=>{
+    btn.onclick = e=>{
+      const id = e.target.closest('[data-id]').dataset.id;
+      const p = state.parties.find(x=>String(x.id) === String(id));
+      showTransactionEditor({partyId:p.id, partyName:p.name});
+    };
+  });
+
+  $('#party-search').oninput = (e)=>{
+    const q = e.target.value.toLowerCase();
+    const type = $('#party-type-filter').value;
+    const list = state.parties.filter(p=>{
+      if(type && p.type !== type) return false;
+      if(!q) return true;
+      return (p.name||'').toLowerCase().includes(q) || (p.phone||'').toLowerCase().includes(q) || (p.note||'').toLowerCase().includes(q);
+    });
+    $('#party-list').innerHTML = list.map(p=>`<div class="tx" data-id="${p.id}"><div><div style="font-weight:600">${p.name} <span class="small">(${p.type||'unknown'})</span></div><div class="small">${p.phone||''}</div></div><div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end"><div class="small">Balance: ${fmt(p.balance||0)}</div><div style="display:flex;gap:6px"><button class="btn ghost edit-party">Edit</button><button class="btn" data-action="new-tx">Tx</button></div></div></div>`).join('');
+    Array.from($('#party-list').querySelectorAll('.edit-party')).forEach(btn=>{
+      btn.onclick = e=>{
+        const id = e.target.closest('[data-id]').dataset.id;
+        const p = state.parties.find(x=>String(x.id) === String(id));
+        showPartyEditor(p);
+      };
+    });
+    Array.from($('#party-list').querySelectorAll('button[data-action="new-tx"]')).forEach(btn=>{
+      btn.onclick = e=>{
+        const id = e.target.closest('[data-id]').dataset.id;
+        const p = state.parties.find(x=>String(x.id) === String(id));
+        showTransactionEditor({partyId:p.id, partyName:p.name});
+      };
+    });
+  });
+}
+
+function showPartyEditor(p){
+  const isNew = !p;
+  const html = `
+    <div style="max-width:520px">
+      <h3>${isNew ? 'Add Party' : 'Edit Party'}</h3>
+      <div class="form">
+        <input id="party-name" placeholder="Name" value="${p?escapeHtml(p.name):''}"/>
+        <select id="party-type"><option value="vendor">Vendor</option><option value="customer">Customer</option></select>
+        <input id="party-phone" placeholder="Phone" value="${p?escapeHtml(p.phone||''):''}"/>
+        <textarea id="party-note" placeholder="Note" rows="3">${p?escapeHtml(p.note||''):''}</textarea>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          ${isNew ? '<button class="btn" id="save-party">Create</button>' : '<button class="btn" id="save-party">Save</button><button class="btn ghost" id="del-party">Delete</button>'}
+        </div>
+      </div>
+    </div>
+  `;
+  showModal(html);
+  if(p) $('#party-type').value = p.type;
+  $('#save-party').onclick = async ()=>{
+    const name = $('#party-name').value.trim();
+    if(!name) return alert('Name required');
+    const obj = { name, type: $('#party-type').value, phone: $('#party-phone').value.trim(), note: $('#party-note').value.trim() };
+    if(p){
+      obj.id = p.id;
+      await idbPut('parties', obj);
+    } else {
+      await idbAdd('parties', obj);
+    }
+    await loadData();
+    closeModal();
+    renderParties();
+  };
+  if(p) $('#del-party').onclick = async ()=>{
+    if(!confirm('Delete party and all related transactions?')) return;
+    await idbDelete('parties', p.id);
+    // delete related transactions
+    const txs = state.transactions.filter(t=> t.partyId === p.id);
+    for(const t of txs) await idbDelete('transactions', t.id);
+    await loadData();
+    closeModal();
+    renderParties();
+  };
+}
+
+/* ---------- Page: Transactions ---------- */
+function renderTransactions(){
+  let html = `
+    <h2>Transactions</h2>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <select id="tx-filter-type"><option value="">All</option><option value="sale">Sales</option><option value="purchase">Purchases</option></select>
+      <input id="tx-search" placeholder="Search by party or note" style="min-width:320px"/>
+    </div>
+    <div class="list card" id="tx-list">
+      ${state.transactions.slice().reverse().map(tx=>renderTxRowHtml(tx)).join('')}
+    </div>
+  `;
+  $('#page-content').innerHTML = html;
+
+  $all('.view-tx').forEach(b => b.onclick = e=>{
+    const id = e.target.dataset.id;
+    const tx = state.transactions.find(t=> String(t.id) === String(id));
+    showTransactionViewer(tx);
+  });
+  $all('.pay-tx').forEach(b=> b.onclick = e=>{
+    const id = e.target.dataset.id;
+    const tx = state.transactions.find(t=> String(t.id) === String(id));
+    showPaymentEditor(tx);
+  });
+
+  $('#tx-search').oninput = (e)=>{
+    const q = e.target.value.toLowerCase();
+    const type = $('#tx-filter-type').value;
+    const list = state.transactions.filter(t=>{
+      if(type && t.type !== type) return false;
+      const party = state.parties.find(p=> p.id === t.partyId);
+      const pn = party ? (party.name||'').toLowerCase() : '';
+      return !q || pn.includes(q) || (t.note||'').toLowerCase().includes(q);
+    }).slice().reverse();
+    $('#tx-list').innerHTML = list.map(tx=>renderTxRowHtml(tx)).join('');
+    $all('.view-tx').forEach(b => b.onclick = e=>{
+      const id = e.target.dataset.id;
+      const tx = state.transactions.find(t=> String(t.id) === String(id));
+      showTransactionViewer(tx);
+    });
+    $all('.pay-tx').forEach(b=> b.onclick = e=>{
+      const id = e.target.dataset.id;
+      const tx = state.transactions.find(t=> String(t.id) === String(id));
+      showPaymentEditor(tx);
+    });
+  };
+}
+
+function renderTxRowHtml(tx){
+  const party = state.parties.find(p=> p.id === tx.partyId) || {name:'Unknown'};
+  const paid = (tx.payments||[]).reduce((s,p)=> s + Number(p.amount||0), 0);
+  const balance = Number(tx.total||0) - paid;
+  return `<div class="tx">
+    <div>
+      <div style="font-weight:600">${tx.type === 'sale' ? 'Sale' : 'Purchase'} · ${party.name}</div>
+      <div class="small">${tx.date || ''} · ${tx.note || ''}</div>
+    </div>
+    <div style="text-align:right">
+      <div style="font-weight:700">PKR ${fmt(tx.total)}</div>
+      <div class="small">Paid ${fmt(paid)} · Due ${fmt(balance)}</div>
+      <div style="height:6px"></div>
+      <div style="display:flex;gap:6px;justify-content:flex-end">
+        <button class="btn ghost view-tx" data-id="${tx.id}">View</button>
+        <button class="btn pay-tx" data-id="${tx.id}">Payment</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function showTransactionEditor(pref){
+  const partiesOptions = state.parties.map(p=>`<option value="${p.id}">${p.name} (${p.type||''})</option>`).join('');
+  const html = `
+    <div style="max-width:720px">
+      <h3>Create Transaction</h3>
+      <div class="form">
+        <div class="row"><select id="tx-type"><option value="sale">Sale (to Customer)</option><option value="purchase">Purchase (from Vendor)</option></select><select id="tx-party"><option value="">Choose party</option>${partiesOptions}</select></div>
+        <input id="tx-date" type="text" placeholder="Date (YYYY-MM-DD)" value="${new Date().toISOString().slice(0,10)}" />
+        <input id="tx-total" type="number" step="0.01" placeholder="Total amount" />
+        <textarea id="tx-note" placeholder="Note (ticket details, numbers)"></textarea>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn" id="save-tx">Save Transaction</button>
+        </div>
+      </div>
+    </div>
+  `;
+  showModal(html);
+  if(pref && pref.partyId) $('#tx-party').value = pref.partyId;
+  $('#save-tx').onclick = async ()=>{
+    const type = $('#tx-type').value;
+    const partyId = Number($('#tx-party').value);
+    if(!partyId) return alert('Choose a party');
+    const total = Number($('#tx-total').value);
+    const date = $('#tx-date').value;
+    const note = $('#tx-note').value;
+    const txObj = { type, partyId, total, date, note, payments:[] };
+    await idbAdd('transactions', txObj);
+    await loadData();
+    closeModal();
+    renderTransactions();
+  };
+}
+
+function showTransactionViewer(tx){
+  const party = state.parties.find(p=> p.id === tx.partyId) || {name:'Unknown'};
+  const paid = (tx.payments||[]).reduce((s,p)=> s + Number(p.amount||0), 0);
+  const balance = Number(tx.total||0) - paid;
+  const paymentsHtml = (tx.payments||[]).map(p=>`<div style="display:flex;justify-content:space-between;padding:6px;border-bottom:1px solid #f1f3f6"><div>${p.date} · ${p.note||''}</div><div>${fmt(p.amount)}</div></div>`).join('');
+  const html = `
+    <div style="max-width:720px">
+      <h3>Transaction</h3>
+      <div class="small">Type: ${tx.type} · Party: ${party.name}</div>
+      <div style="height:8px"></div>
+      <div id="invoice-preview">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-weight:700">${state.settings.businessName || 'Ticket Ledger'}</div>
+            <div class="small">Transaction: ${tx.id}</div>
+          </div>
+          <div style="text-align:right">
+            <div>Amount</div>
+            <div style="font-weight:700">PKR ${fmt(tx.total)}</div>
+            <div class="small">Paid: PKR ${fmt(paid)} · Due: PKR ${fmt(balance)}</div>
+          </div>
+        </div>
+        <div style="height:12px"></div>
+        <div class="small">Payments</div>
+        <div>${paymentsHtml || '<div class="small">No payments yet</div>'}</div>
+      </div>
+      <div style="height:12px"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn" id="print-invoice">Print Invoice</button>
+        <button class="btn ghost" id="export-csv">Export CSV</button>
+        <button class="btn" id="add-payment">Add Payment</button>
+      </div>
+    </div>
+  `;
+  showModal(html);
+  $('#add-payment').onclick = ()=>{ closeModal(); showPaymentEditor(tx); };
+  $('#print-invoice').onclick = ()=>{ window.print(); };
+  $('#export-csv').onclick = ()=>{
+    const rows = [['Transaction ID','Type','Party','Date','Total','Paid','Due','Note']];
+    rows.push([tx.id, tx.type, party.name, tx.date, tx.total, paid, balance, tx.note]);
+    downloadCSV(rows, `transaction-${tx.id}.csv`);
+  };
+}
+
+function showPaymentEditor(tx){
+  const html = `
+    <div style="max-width:520px">
+      <h3>Add Payment</h3>
+      <div class="form">
+        <div class="small">Transaction: ${tx.id} · Total: PKR ${fmt(tx.total)}</div>
+        <input id="pay-amount" type="number" placeholder="Amount" />
+        <input id="pay-date" placeholder="Date (YYYY-MM-DD)" value="${new Date().toISOString().slice(0,10)}" />
+        <input id="pay-note" placeholder="Note (cash, bank, partial...)" />
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn" id="save-pay">Save Payment</button>
+        </div>
+      </div>
+    </div>
+  `;
+  showModal(html);
+  $('#save-pay').onclick = async ()=>{
+    const amount = Number($('#pay-amount').value);
+    if(!amount || amount <= 0) return alert('Enter amount');
+    const date = $('#pay-date').value;
+    const note = $('#pay-note').value;
+    tx.payments = tx.payments || [];
+    tx.payments.push({id: uid(), amount, date, note});
+    await idbPut('transactions', tx);
+    await loadData();
+    closeModal();
+    renderTransactions();
+  };
+}
+
+/* ---------- Page: Invoices ---------- */
+function renderInvoices(){
+  // list transactions with print/export
+  let html = `
+    <h2>Invoices & Print</h2>
+    <div style="display:flex;gap:8px;margin-bottom:8px">
+      <select id="inv-filter"><option value="">All</option><option value="sale">Sales</option><option value="purchase">Purchases</option></select>
+      <input id="inv-search" placeholder="Search by party or id" style="min-width:320px" />
+    </div>
+    <div class="list card" id="inv-list">
+      ${state.transactions.slice().reverse().map(tx=>{
+        const p = state.parties.find(pp => pp.id === tx.partyId) || {name:'Unknown'};
+        return `<div class="tx"><div><div style="font-weight:600">${tx.type} · ${p.name}</div><div class="small">${tx.date} · ID: ${tx.id}</div></div><div style="text-align:right"><div style="font-weight:700">PKR ${fmt(tx.total)}</div><div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px"><button class="btn ghost inv-print" data-id="${tx.id}">Print</button><button class="btn inv-export" data-id="${tx.id}">CSV</button></div></div></div>`;
+      }).join('')}
+    </div>
+  `;
+  $('#page-content').innerHTML = html;
+  $all('.inv-print').forEach(b=> b.onclick = e=>{
+    const id = e.target.dataset.id;
+    const tx = state.transactions.find(t=> String(t.id) === String(id));
+    showTransactionViewer(tx);
+  });
+  $all('.inv-export').forEach(b=> b.onclick = e=>{
+    const id = e.target.dataset.id;
+    const tx = state.transactions.find(t=> String(t.id) === String(id));
+    const party = state.parties.find(p=> p.id === tx.partyId) || {name:'Unknown'};
+    const paid = (tx.payments||[]).reduce((s,p)=> s + Number(p.amount||0), 0);
+    const rows = [['ID','Type','Party','Date','Total','Paid','Due','Note']];
+    rows.push([tx.id,tx.type,party.name,tx.date,tx.total,paid,(tx.total - paid),tx.note]);
+    downloadCSV(rows, `invoice-${tx.id}.csv`);
+  });
+
+  $('#inv-search').oninput = e=>{
+    const q = e.target.value.toLowerCase();
+    const type = $('#inv-filter').value;
+    const list = state.transactions.filter(t=>{
+      if(type && t.type !== type) return false;
+      const p = state.parties.find(pp=> pp.id === t.partyId) || {name:''};
+      return !q || (p.name||'').toLowerCase().includes(q) || String(t.id).includes(q);
+    }).slice().reverse();
+    $('#inv-list').innerHTML = list.map(tx=>{
+      const p = state.parties.find(pp => pp.id === tx.partyId) || {name:'Unknown'};
+      return `<div class="tx"><div><div style="font-weight:600">${tx.type} · ${p.name}</div><div class="small">${tx.date} · ID: ${tx.id}</div></div><div style="text-align:right"><div style="font-weight:700">PKR ${fmt(tx.total)}</div><div style="display:flex;gap:6px;justify-content:flex-end;margin-top:6px"><button class="btn ghost inv-print" data-id="${tx.id}">Print</button><button class="btn inv-export" data-id="${tx.id}">CSV</button></div></div></div>`;
+    }).join('');
+    $all('.inv-print').forEach(b=> b.onclick = e=>{
+      const id = e.target.dataset.id;
+      const tx = state.transactions.find(t=> String(t.id) === String(id));
+      showTransactionViewer(tx);
+    });
+    $all('.inv-export').forEach(b=> b.onclick = e=>{
+      const id = e.target.dataset.id;
+      const tx = state.transactions.find(t=> String(t.id) === String(id));
+      const party = state.parties.find(p=> p.id === tx.partyId) || {name:'Unknown'};
+      const paid = (tx.payments||[]).reduce((s,p)=> s + Number(p.amount||0), 0);
+      const rows = [['ID','Type','Party','Date','Total','Paid','Due','Note']];
+      rows.push([tx.id,tx.type,party.name,tx.date,tx.total,paid,(tx.total - paid),tx.note]);
+      downloadCSV(rows, `invoice-${tx.id}.csv`);
+    });
+  };
+}
+
+/* ---------- Page: Reports ---------- */
+function renderReports(){
+  const c = computeSummary();
+  const partyRows = Object.values(c.partyBalances).map(pb=> [pb.name, pb.balance>=0 ? pb.balance : -pb.balance, pb.balance>=0 ? 'Receivable' : 'Payable']);
+  const html = `
+    <h2>Reports</h2>
+    <div class="grid">
+      <div class="card"><div class="small">Total Sales</div><div style="font-weight:700">PKR ${fmt(c.totalSales)}</div></div>
+      <div class="card"><div class="small">Total Purchases</div><div style="font-weight:700">PKR ${fmt(c.totalPurchases)}</div></div>
+      <div class="card"><div class="small">Profit / Loss</div><div style="font-weight:700">${c.profit>=0?('PKR '+fmt(c.profit)):'- PKR '+fmt(Math.abs(c.profit))}</div></div>
+      <div class="card">
+        <div class="small">Party Balances</div>
+        <div style="max-height:240px;overflow:auto">
+          ${partyRows.map(pr=>`<div style="display:flex;justify-content:space-between;padding:6px;border-bottom:1px solid #f1f3f6"><div>${pr[0]}</div><div class="small">${pr[2]} · PKR ${fmt(pr[1])}</div></div>`).join('')}
+        </div>
+        <div style="height:8px"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end">
+          <button class="btn" id="export-report-csv">Export CSV</button>
+        </div>
+      </div>
+    </div>
+  `;
+  $('#page-content').innerHTML = html;
+  $('#export-report-csv').onclick = ()=>{
+    const rows = [['Metric','Value']];
+    rows.push(['Total Sales', c.totalSales]);
+    rows.push(['Total Purchases', c.totalPurchases]);
+    rows.push(['Profit', c.profit]);
+    rows.push([]);
+    rows.push(['Party','Balance','Type']);
+    Object.values(c.partyBalances).forEach(pb=> rows.push([pb.name, pb.balance >=0 ? pb.balance : -pb.balance, pb.balance >=0 ? 'Receivable' : 'Payable']));
+    downloadCSV(rows, 'report-summary.csv');
+  };
+}
+
+/* ---------- Page: Backup & Restore ---------- */
+function renderBackup(){
+  const html = `
+    <h2>Backup & Restore</h2>
+    <div style="display:flex;gap:8px">
+      <button class="btn" id="backup-btn">Download Backup (JSON)</button>
+      <label class="btn ghost" style="display:inline-block">
+        Restore <input id="restore-file" type="file" style="display:none" accept=".json"/>
+      </label>
+    </div>
+    <div style="height:12px"></div>
+    <div class="small">The backup file contains all parties, transactions and settings. Keep it safe. Restoring overwrites current local data.</div>
+  `;
+  $('#page-content').innerHTML = html;
+  $('#backup-btn').onclick = async ()=>{
+    const parties = await idbGetAll('parties');
+    const transactions = await idbGetAll('transactions');
+    const settings = await idbGetAll('settings');
+    const payload = {meta:{created: new Date().toISOString()}, parties, transactions, settings};
+    const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'ticket-ledger-backup.json'; a.click(); URL.revokeObjectURL(url);
+  };
+  $('#restore-file').onchange = async (e)=>{
+    const f = e.target.files[0]; if(!f) return;
+    if(!confirm('Restoring will overwrite current local data. Continue?')) return;
+    const text = await f.text();
+    try{
+      const data = JSON.parse(text);
+      // clear stores and re-populate
+      await idbClear('parties'); await idbClear('transactions'); await idbClear('settings');
+      for(const p of data.parties || []) await idbAdd('parties', p);
+      for(const t of data.transactions || []) await idbAdd('transactions', t);
+      for(const s of data.settings || []) await idbAdd('settings', s);
+      await loadData(); await loadSettings();
+      alert('Restore complete');
+      renderPage();
+    }catch(err){
+      alert('Invalid backup file');
+    }
+  };
+}
+
+/* ---------- Page: Settings ---------- */
+function renderSettings(){
+  const html = `
+    <h2>Settings</h2>
+    <div style="display:flex;gap:12px;flex-wrap:wrap">
+      <div style="flex:1;min-width:280px" class="card">
+        <div class="small">Business name</div>
+        <input id="setting-business-name" value="${escapeHtml(state.settings.businessName || '')}" />
+        <div style="height:8px"></div>
+        <div class="small">Logo (uploaded image will be stored locally)</div>
+        <input id="logo-file" type="file" accept="image/*" />
+        <div style="height:8px"></div>
+        <button class="btn" id="save-settings">Save</button>
+        <div style="height:8px"></div>
+        <div class="small">PIN management</div>
+        <div style="display:flex;gap:8px">
+          <input id="new-pin-val" placeholder="New 4-digit PIN" />
+          <button class="btn ghost" id="btn-set-pin">Set</button>
+          <button class="btn" id="btn-clear-pin">Clear</button>
+        </div>
+      </div>
+      <div style="flex:1;min-width:280px" class="card">
+        <div class="small">Privacy</div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn" id="btn-lock">Lock Now</button>
+          <button class="btn ghost" id="btn-unlock">Unlock</button>
+        </div>
+        <div style="height:12px"></div>
+        <div class="small">Danger</div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <button class="btn ghost" id="btn-clear-data">Clear All Data</button>
+        </div>
+      </div>
+    </div>
+  `;
+  $('#page-content').innerHTML = html;
+
+  $('#save-settings').onclick = async ()=>{
+    const bn = $('#setting-business-name').value.trim();
+    await saveSetting('businessName', bn);
+    // logo
+    const f = $('#logo-file').files[0];
+    if(f){
+      const reader = new FileReader();
+      reader.onload = async (ev)=>{
+        const dataUrl = ev.target.result;
+        await saveSetting('logo', dataUrl);
+        state.logoDataUrl = dataUrl;
+        $('#logo-img').src = dataUrl;
+        alert('Settings saved');
+        await loadSettings();
+        renderPage();
+      };
+      reader.readAsDataURL(f);
+    } else {
+      await loadSettings();
+      alert('Settings saved');
+    }
+  };
+  $('#btn-set-pin').onclick = async ()=>{
+    const pin = $('#new-pin-val').value.trim();
+    try{ await setPIN(pin); alert('PIN saved'); }catch(e){ alert(e); }
+  };
+  $('#btn-clear-pin').onclick = async ()=>{ if(confirm('Clear PIN?')) await clearPIN(); };
+  $('#btn-lock').onclick = async ()=>{ await saveSetting('locked', true); state.settings.locked = true; updateLockUI(); alert('Locked'); showLockScreen(); };
+  $('#btn-unlock').onclick = async ()=>{ await saveSetting('locked', false); state.settings.locked = false; updateLockUI(); alert('Unlocked'); };
+  $('#btn-clear-data').onclick = async ()=>{
+    if(!confirm('Clear ALL local data? This cannot be undone.')) return;
+    await idbClear('parties'); await idbClear('transactions'); // keep settings? also clear
+    await idbClear('settings');
+    location.reload();
+  };
+}
+
+/* ---------- Backup Helpers ---------- */
+function downloadCSV(rows, filename='export.csv'){
+  const csv = rows.map(r=> r.map(c=> `"${String(c||'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], {type:'text/csv'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href = url; a.download = filename; a.click(); URL.revokeObjectURL(url);
+}
+
+/* ---------- Small helpers ---------- */
+function escapeHtml(s=''){ return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
+
+/* ---------- Top-level init & events ---------- */
+(async ()=>{
+  await openDB();
+  await loadData();
+  await loadSettings();
+
+  // register sw
+  if('serviceWorker' in navigator){
+    try{ navigator.serviceWorker.register('sw.js'); }catch(e){ console.warn('sw register failed', e); }
+  }
+
+  // initial page
+  document.title = state.settings.businessName || 'Ticket Ledger';
+  // menu click
+  $all('#menu button').forEach(b=> b.onclick = (e)=>{ state.page = b.dataset.page; renderPage(); });
+  // add buttons
+  $('#add-party-btn').onclick = ()=> showPartyEditor();
+  $('#add-tx-btn').onclick = ()=> showTransactionEditor();
+
+  // global search -> switch pages appropriately
+  $('#global-search').oninput = (e)=>{
+    const q = e.target.value.toLowerCase();
+    if(q.length < 1) return;
+    // try search parties
+    const party = state.parties.find(p=> (p.name||'').toLowerCase().includes(q) || (p.phone||'').toLowerCase().includes(q));
+    if(party){ state.page = 'parties'; renderPage(); setTimeout(()=>{ $('#party-search').value = q; $('#party-search').dispatchEvent(new Event('input')) }, 80); return; }
+    // search transactions
+    const tx = state.transactions.find(t=> (t.note||'').toLowerCase().includes(q) || String(t.id).includes(q));
+    if(tx){ state.page = 'transactions'; renderPage(); setTimeout(()=>{ $('#tx-search').value = q; $('#tx-search').dispatchEvent(new Event('input')) },80); return; }
+  };
+
+  // initial pin flow
+  await initialPINFlow();
+
+  // update UI
+  renderPage();
+})();
+</script>
+</body>
+</html>
