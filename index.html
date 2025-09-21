@@ -868,8 +868,10 @@ function escapeHtml(s=''){ return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;
   await loadSettings();
 
   // register sw
-  if('serviceWorker' in navigator){
-    try{ navigator.serviceWorker.register('sw.js'); }catch(e){ console.warn('sw register failed', e); }
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('./sw.js');
+}
+
   }
 
   // initial page
@@ -901,4 +903,5 @@ function escapeHtml(s=''){ return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;
 </script>
 </body>
 </html>
+
 
